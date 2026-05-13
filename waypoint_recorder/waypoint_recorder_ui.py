@@ -288,21 +288,25 @@ class MainWindow(QMainWindow):
         self.btn_stop  = QPushButton('■  저장 완료')
         self.btn_undo  = QPushButton('↩  Undo')
         self.btn_clear = QPushButton('✕  초기화')
+        self.btn_load  = QPushButton('📂  YAML 불러오기')   # ← NEW
         self.btn_send  = QPushButton('⬆  Nav2 전송')
 
         self.btn_start.setStyleSheet(self._btn_style('#39ff7e'))
         self.btn_stop.setStyleSheet(self._btn_style('#ffd166'))
         self.btn_undo.setStyleSheet(self._btn_style('#ff3b5c'))
         self.btn_clear.setStyleSheet(self._btn_style('#5a6480'))
+        self.btn_load.setStyleSheet(self._btn_style('#a78bfa'))   # ← NEW  보라색
         self.btn_send.setStyleSheet(self._btn_style('#00e5ff'))
 
         self.btn_start.clicked.connect(self._on_start)
         self.btn_stop.clicked.connect(self._on_stop)
         self.btn_undo.clicked.connect(self._on_undo)
         self.btn_clear.clicked.connect(self._on_clear)
+        self.btn_load.clicked.connect(self._on_load_yaml)         # ← NEW
         self.btn_send.clicked.connect(self._on_send)
 
-        for btn in [self.btn_start, self.btn_stop, self.btn_undo, self.btn_clear, self.btn_send]:
+        for btn in [self.btn_start, self.btn_stop, self.btn_undo,
+                    self.btn_clear, self.btn_load, self.btn_send]:
             ctrl_layout.addWidget(btn)
 
         root.addWidget(ctrl_group)
@@ -348,6 +352,7 @@ class MainWindow(QMainWindow):
             'RECORDING': ('RECORDING', 'background:rgba(57,255,126,25);  color:#39ff7e;  border:1px solid rgba(57,255,126,80);'),
             'DONE':      ('DONE',      'background:rgba(0,229,255,20);   color:#00e5ff;  border:1px solid rgba(0,229,255,80);'),
             'SENDING':   ('SENDING',   'background:rgba(255,107,53,20);  color:#ff6b35;  border:1px solid rgba(255,107,53,80);'),
+            'LOADED':    ('LOADED',    'background:rgba(167,139,250,20); color:#a78bfa;  border:1px solid rgba(167,139,250,80);'),  # ← NEW
         }
         text, style = styles.get(state, styles['IDLE'])
         base = "font-size:11px; font-weight:600; padding:4px 12px; border-radius:4px; font-family:'Consolas','Courier New',monospace; "
@@ -363,6 +368,7 @@ class MainWindow(QMainWindow):
         self.btn_stop.setEnabled(self.recording)
         self.btn_undo.setEnabled(has_wp and self.recording)
         self.btn_clear.setEnabled(has_wp and not self.recording)
+        self.btn_load.setEnabled(not self.recording)               # ← NEW
         self.btn_send.setEnabled(has_wp and not self.recording)
 
     # ── Button handlers ───────────────────────────────────────────────────────
@@ -400,6 +406,100 @@ class MainWindow(QMainWindow):
             self._set_state('IDLE')
             self._set_status('초기화되었습니다.')
             self._update_buttons()
+
+    # ── NEW: YAML 불러오기 ────────────────────────────────────────────────────
+    def _on_load_yaml(self):
+        """파일 다이얼로그로 YAML을 선택하고 웨이포인트를 테이블에 로드."""
+        filepath, _ = QFileDialog.getOpenFileName(
+            self, 'YAML 파일 불러오기',
+            self.path_edit.text(),
+            'YAML Files (*.yaml *.yml);;All Files (*)'
+        )
+        if not filepath:
+            return
+
+        try:
+            with open(filepath, 'r') as f:
+                data = yaml.safe_load(f)
+        except Exception as e:
+            QMessageBox.critical(self, 'YAML 읽기 오류', str(e))
+            return
+
+        # ── 포맷 검증
+        if not isinstance(data, dict) or 'waypoints' not in data:
+            QMessageBox.critical(
+                self, '포맷 오류',
+                "'waypoints' 키가 없는 파일입니다.\n"
+                "이 앱으로 저장한 YAML 파일을 선택해 주세요."
+            )
+            return
+
+        raw_wps = data['waypoints']
+        if not isinstance(raw_wps, list) or len(raw_wps) == 0:
+            QMessageBox.warning(self, '경고', '웨이포인트 목록이 비어 있습니다.')
+            return
+
+        # ── 기존 데이터가 있으면 덮어쓸지 확인
+        if self.waypoints:
+            reply = QMessageBox.question(
+                self, '확인',
+                f'현재 {len(self.waypoints)}개의 웨이포인트가 있습니다.\n'
+                '불러온 데이터로 교체하시겠습니까?',
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                return
+
+        # ── 테이블 & 내부 데이터 초기화 후 로드
+        self.waypoints.clear()
+        self.table.setRowCount(0)
+
+        errors = []
+        for idx, wp in enumerate(raw_wps):
+            try:
+                pos = wp['position']
+                ori = wp['orientation']
+                x   = float(pos['x'])
+                y   = float(pos['y'])
+                qz  = float(ori['z'])
+                qw  = float(ori['w'])
+            except (KeyError, TypeError, ValueError) as e:
+                errors.append(f'  #{ idx + 1 }: {e}')
+                continue
+
+            self.waypoints.append({
+                'position':    {'x': round(x,  4), 'y': round(y,  4), 'z': float(pos.get('z', 0.0))},
+                'orientation': {
+                    'x': float(ori.get('x', 0.0)),
+                    'y': float(ori.get('y', 0.0)),
+                    'z': round(qz, 6),
+                    'w': round(qw, 6),
+                }
+            })
+
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            for col, val in enumerate([str(row + 1), f'{x:.4f}', f'{y:.4f}', f'{qz:.4f}', f'{qw:.4f}']):
+                item = QTableWidgetItem(val)
+                item.setTextAlignment(Qt.AlignCenter)
+                if col == 0:
+                    item.setForeground(QColor('#5a6480'))
+                self.table.setItem(row, col, item)
+
+        self.count_label.setText(str(len(self.waypoints)))
+        self._set_state('LOADED')
+
+        fname = os.path.basename(filepath)
+        if errors:
+            QMessageBox.warning(
+                self, '일부 웨이포인트 오류',
+                f'{len(self.waypoints)}개 로드 성공, {len(errors)}개 건너뜀:\n' + '\n'.join(errors)
+            )
+            self._set_status(f'[{fname}] {len(self.waypoints)}개 로드 (일부 오류)')
+        else:
+            self._set_status(f'[{fname}] {len(self.waypoints)}개 웨이포인트 로드 완료 → Nav2 전송 버튼으로 실행하세요.')
+
+        self._update_buttons()
 
     def _on_send(self):
         if not self.waypoints:
